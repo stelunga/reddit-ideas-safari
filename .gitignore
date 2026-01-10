@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+*.egg
+*.env
+.venv/
+venv/
+ENV/
+build/
+dist/
+.eggs/
+*.log
+*.sqlite3
+*.db
+*.DS_Store
+
+# VS Code
+.vscode/
+
+# Reports
+reports/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Test outputs
+htmlcov/
+.coverage
+.tox/
+.nox/
+
+# Environment
+.env
+.env.*
+
+# MacOS
+.DS_Store
+
+# Misc
+*.swp
+*.bak
+*.tmp
+*.orig
+*.old
+
+# PyInstaller
+*.spec
+
+# mypy
+.mypy_cache/
+.dmypy.json
+
+# pytest
+.cache/
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# pyright
+pyrightconfig.json

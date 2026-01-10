@@ -163,7 +163,8 @@ def generate_markdown_report(industry, findings):
 @click.command()
 @click.option('--industry', prompt='Target Industry', help='The industry to scan (e.g., "plumbers", "accountants").')
 @click.option('--limit', default=10, help='Number of search results to process.')
-def main(industry, limit):
+@click.option('--test-mode', is_flag=True, default=False, help='Run in test mode (limit to 5 searches total).')
+def main(industry, limit, test_mode):
     """Automates the 'Safari' technique for validating business ideas on Reddit."""
     
     # 1. Load Config
@@ -175,6 +176,9 @@ def main(industry, limit):
 
     # 2. Search (initial run with higher limit)
     initial_limit = max(limit, 30)  # Ensure at least 30 per category
+    if test_mode:
+        click.echo("[TEST MODE] Limiting to 5 total searches.")
+        initial_limit = 2
     click.echo("Starting search...")
     search_results = search_reddit(industry, config, initial_limit)
 
@@ -185,10 +189,14 @@ def main(industry, limit):
     # 3. Scrape & Analyze
     click.echo("Processing results...")
     analyzed_findings = []
-    for res in search_results:
+    start_time = time.time()
+    for idx, res in enumerate(search_results, 1):
         url = res.get('href')
         if not url:
             continue
+        elapsed = time.time() - start_time
+        mins, secs = divmod(int(elapsed), 60)
+        click.echo(f"[{idx}/{len(search_results)}] Elapsed: {mins:02d}:{secs:02d} - Processing: {url}")
         data = scrape_thread(url)
         if data:
             analyzed = analyze_content(data, config)
@@ -200,7 +208,8 @@ def main(industry, limit):
 
     # Fallback: if not enough relevant results, do one more run with pairwise combos
     min_relevant = 10
-    if len(relevant) < min_relevant:
+    # Prevent fallback in test mode
+    if not test_mode and len(relevant) < min_relevant:
         click.echo(f"Not enough relevant results (found {len(relevant)} with score >= 3). Running fallback pairwise search...")
         from itertools import combinations
         extra_results = []

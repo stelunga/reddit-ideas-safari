@@ -91,6 +91,18 @@ You will be prompted to enter the target industry.
 python reddit_safari.py --industry "accountants" --limit 20
 ```
 
+**Test Mode:**
+
+To quickly verify the tool works without running a full search, use the `--test-mode` flag. This limits the number of searches per category (default: 2) and disables fallback searches for speed.
+
+```bash
+python reddit_safari.py --industry "test" --test-mode
+```
+
+- Only a small number of results will be processed.
+- Fallback (pairwise) search is skipped in test mode.
+- Useful for debugging or checking installation.
+
 ### 3. Running Tests
 
 To run the test suite:
