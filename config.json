@@ -1,0 +1,36 @@
+{
+  "pain_keywords": {
+    "Struggle": [
+      "sucks",
+      "hate",
+      "pain",
+      "annoying",
+      "nightmare",
+      "frustrating",
+      "terrible",
+      "waste of time"
+    ],
+    "Workaround": [
+      "spreadsheet",
+      "excel",
+      "pen and paper",
+      "manual",
+      "copy paste",
+      "clunky",
+      "hacky"
+    ],
+    "Big Fail": [
+      "too expensive",
+      "too complex",
+      "overkill",
+      "bloated",
+      "unaffordable"
+    ],
+    "Question": [
+      "is there a tool",
+      "how do you guys track",
+      "any alternatives to",
+      "recommendation for"
+    ]
+  }
+}
