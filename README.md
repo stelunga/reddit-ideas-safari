@@ -1,5 +1,7 @@
 # Reddit Pain Safari
 
+[![Launch Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/stelunga/reddit-ideas-safari/HEAD)
+
 ## Overview
 
 This tool automates the "Safari" technique for validating business ideas. It scans Reddit for professionals in specific industries complaining about their daily workflows, identifying "pain markers" that indicate potential for software solutions (SaaS, Micro-SaaS).
@@ -60,7 +62,16 @@ This tool automates the "Safari" technique for validating business ideas. It sca
 
 ## Usage
 
-### 1. Installation
+### 1. Run Online (No Installation)
+
+- **Binder**: Click the "Launch Binder" badge above. This service is **free** and runs in your browser.
+  1. Wait for the environment to load (this may take a minute).
+  2. When the terminal appears, type:
+     ```bash
+     python reddit_safari.py
+     ```
+
+### 2. Local Installation
 
 It is recommended to use a virtual environment.
 
