@@ -65,6 +65,8 @@ This tool automates the "Safari" technique for discovering business ideas. It sc
 
 ### 1. Run Online (No Installation)
 
+❗**NOTE** - this is currently **NOT** working
+
 [![Launch Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/stelunga/reddit-ideas-safari/HEAD)
 
 - **Binder**: Click the "Launch Binder" badge above. This service is **free** and runs in your browser.
