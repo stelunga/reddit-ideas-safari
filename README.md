@@ -1,10 +1,8 @@
 # Reddit Pain Safari
 
-[![Launch Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/stelunga/reddit-ideas-safari/HEAD)
-
 ## Overview
 
-This tool automates the "Safari" technique for validating business ideas. It scans Reddit for professionals in specific industries complaining about their daily workflows, identifying "pain markers" that indicate potential for software solutions (SaaS, Micro-SaaS).
+This tool automates the "Safari" technique for discovering business ideas. It scans Reddit for professionals in specific industries complaining about their daily workflows, identifying "pain markers" that indicate potential for software solutions (SaaS, Micro-SaaS).
 
 ## Architecture
 
@@ -18,7 +16,9 @@ This tool automates the "Safari" technique for validating business ideas. It sca
 
 ### 2. Search Module
 
-- **Engine**: DuckDuckGo (via `duckduckgo-search` or direct request) to avoid Google CAPTCHA/API limits.
+**This and the Scraper Module are temporary workarounds until we have Reddit API (praw) access**
+
+- **Engine**: DuckDuckGo (via `ddgs`) to avoid Google CAPTCHA/API limits.
 - **Strategy**: Generates composite queries.
   - _Format_: `site:reddit.com "[Industry]" ("keyword1" OR "keyword2" ...)`
 - **Filtering**: Limits results to the last ~2 years to ensure relevance.
@@ -41,7 +41,7 @@ This tool automates the "Safari" technique for validating business ideas. It sca
 
 - **Relevance Check**: Discards threads with low engagement (< 5 comments) or old dates (> 2 years).
 - **Keyword Matching**: Scans the extracted text for the pain keywords defined in `config.json`.
-- **Sentiment/Validation**: Looks for validation signals (e.g., phrases like "I agree", "+1", "Same problem").
+- **Semantic Analysis**: Uses `sentence-transformers` to score relevance against business opportunity anchors (e.g., "Time Wasted", "Money Lost") and filter out noise.
 
 ### 5. Output
 
@@ -57,12 +57,15 @@ This tool automates the "Safari" technique for validating business ideas. It sca
 - **Libraries**:
   - `requests` (HTTP requests)
   - `beautifulsoup4` (HTML parsing)
-  - `duckduckgo-search` (Search automation)
-  - `click` or `argparse` (CLI interface)
+  - `ddgs` (Search automation)
+  - `sentence-transformers` (Semantic analysis)
+  - `click` (CLI interface)
 
 ## Usage
 
 ### 1. Run Online (No Installation)
+
+[![Launch Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/stelunga/reddit-ideas-safari/HEAD)
 
 - **Binder**: Click the "Launch Binder" badge above. This service is **free** and runs in your browser.
   1. Wait for the environment to load (this may take a minute).
@@ -84,7 +87,7 @@ source venv/bin/activate  # On Windows use: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Running the Tool
+### 3. Running the Tool
 
 You can run the tool directly from the command line.
 
@@ -114,24 +117,10 @@ python reddit_safari.py --industry "test" --test-mode
 - Fallback (pairwise) search is skipped in test mode.
 - Useful for debugging or checking installation.
 
-### 3. Running Tests
+### 4. Running Tests
 
 To run the test suite:
 
 ```bash
 python -m unittest test_reddit_safari.py
 ```
-
----
-
-## Progress
-
-- [x] Project Initialization & README
-- [x] Configuration File (`config.json`)
-- [x] Dependency Setup (`requirements.txt`)
-- [x] Search Module Implementation
-- [x] Scraper Module Implementation
-- [x] Analyzer Logic
-- [x] Report Generator
-- [x] CLI Entry Point
-- [x] Testing & Validation
