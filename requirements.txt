@@ -2,3 +2,5 @@ requests
 beautifulsoup4
 ddgs
 click
+numpy<2
+sentence-transformers

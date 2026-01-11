@@ -8,9 +8,15 @@ import click
 import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
+from sentence_transformers import SentenceTransformer, util
+import collections
+from itertools import combinations
 
 CONFIG_FILE = 'config.json'
 USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
+
+# Global model variable (lazy loaded)
+semantic_model = None
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
@@ -18,42 +24,101 @@ def load_config():
     with open(CONFIG_FILE, 'r') as f:
         return json.load(f)
 
-def construct_query(industry, config):
-    # Collect all keywords from each category
-    all_keywords = []
-    for cat in config['pain_keywords'].values():
-        all_keywords.extend(cat)  # Use all keywords from each category
+def load_model():
+    global semantic_model
+    if semantic_model is None:
+        click.echo("Loading semantic model (this may take a moment)...")
+        # Use a lightweight model
+        semantic_model = SentenceTransformer('all-MiniLM-L6-v2')
+    return semantic_model
 
-    # Simple OR group
-    keywords_str = " OR ".join([f'"{k}"' for k in all_keywords])
-    return f'site:reddit.com "{industry}" ({keywords_str})'
+def discover_subreddits(industry):
+    """
+    Searches for relevant subreddits for the given industry.
+    Returns a list of top subreddit names (e.g., ['Truckers', 'FreightBrokers']).
+    """
+    click.echo(f"Discovering top subreddits for '{industry}'...")
+    query = f"best subreddits for {industry} site:reddit.com"
+    
+    subreddits = []
+    try:
+        ddgs = DDGS()
+        # Search for discussions about subreddits
+        results = ddgs.text(query, max_results=20)
+        
+        subreddit_pattern = re.compile(r'r/([a-zA-Z0-9_]+)')
+        
+        for res in results:
+            # Check title and body snippet
+            text = (res.get('title', '') + " " + res.get('body', '')).lower()
+            found = subreddit_pattern.findall(text)
+            subreddits.extend(found)
+            
+            # Also check URL if it points to a subreddit
+            url = res.get('href', '')
+            if 'reddit.com/r/' in url:
+                parts = url.split('/r/')
+                if len(parts) > 1:
+                    sub_name = parts[1].split('/')[0]
+                    subreddits.append(sub_name)
 
-def construct_query_for_category(industry, category_keywords):
+    except Exception as e:
+        click.echo(f"Subreddit discovery failed: {e}")
+        return []
+
+    # Filter out common false positives or generic ones if needed
+    blacklist = {'all', 'popular', 'askreddit', 'iama', 'funny', 'pics', 'videos', 'todayilearned', 'reddit'}
+    filtered = [s for s in subreddits if s.lower() not in blacklist and len(s) > 2]
+    
+    # Count frequency
+    counts = collections.Counter(filtered)
+    top_subs = [s for s, c in counts.most_common(5)]
+    
+    click.echo(f"Discovered subreddits: {top_subs}")
+    return top_subs
+
+def construct_query_for_category(industry, category_keywords, subreddits=None):
     keywords_str = " OR ".join([f'"{k}"' for k in category_keywords])
-    return f'site:reddit.com "{industry}" ({keywords_str})'
+    
+    # We return just the keyword part, the caller handles site restriction
+    # But for the query text itself, we include industry + keywords
+    return f'"{industry}" ({keywords_str})'
 
-def search_reddit(industry, config, limit=10):
-    # Parallel search: one thread per pain keyword category
+def search_reddit(industry, config, subreddits, limit=10):
     results = []
     threads = []
     results_lock = threading.Lock()
+    
+    # If we have subreddits, we search specifically within them
+    # If not, we fall back to global search
+    search_targets = subreddits if subreddits else [None]
 
-    def search_category(category, keywords):
-        query = construct_query_for_category(industry, keywords)
-        click.echo(f"Searching [{category}]: {query}")
+    def search_worker(category, keywords, subreddit):
+        query_base = construct_query_for_category(industry, keywords, subreddits)
+        
+        if subreddit:
+            query = f'site:reddit.com/r/{subreddit} {query_base}'
+        else:
+            query = f'site:reddit.com {query_base}'
+            
         try:
             ddgs = DDGS()
-            search_gen = ddgs.text(query, max_results=limit)
+            # We reduce limit per subreddit to avoid exploding result count
+            sub_limit = max(5, int(limit / len(search_targets))) if subreddits else limit
+            
+            search_gen = ddgs.text(query, max_results=sub_limit)
             with results_lock:
                 for r in search_gen:
+                    r['source_subreddit'] = subreddit
                     results.append(r)
         except Exception as e:
-            click.echo(f"Search failed for {category}: {e}")
+            pass
 
     for category, keywords in config['pain_keywords'].items():
-        t = threading.Thread(target=search_category, args=(category, keywords))
-        threads.append(t)
-        t.start()
+        for sub in search_targets:
+            t = threading.Thread(target=search_worker, args=(category, keywords, sub))
+            threads.append(t)
+            t.start()
 
     for t in threads:
         t.join()
@@ -63,7 +128,67 @@ def search_reddit(industry, config, limit=10):
     deduped = []
     for r in results:
         url = r.get('href')
-        if url and url not in seen:
+        if url and url not in seen and 'reddit.com' in url:
+            deduped.append(r)
+            seen.add(url)
+    return deduped
+
+def search_fallback(industry, config, subreddits, limit=10):
+    """
+    Fallback search using pairwise combinations of keywords.
+    Searches within discovered subreddits if available.
+    """
+    click.echo("Running fallback pairwise search...")
+    results = []
+    threads = []
+    results_lock = threading.Lock()
+    
+    search_targets = subreddits if subreddits else [None]
+
+    def search_pair(category, pair, subreddit):
+        # Construct query: "industry" ("kw1" AND "kw2")
+        # We use AND implicitly by just listing them or explicit OR? 
+        # Original logic implies looking for specific combos. Let's use simple space (AND)
+        query_text = f'"{industry}" "{pair[0]}" "{pair[1]}"'
+        
+        if subreddit:
+            query = f'site:reddit.com/r/{subreddit} {query_text}'
+        else:
+            query = f'site:reddit.com {query_text}'
+
+        try:
+            ddgs = DDGS()
+            search_gen = ddgs.text(query, max_results=limit)
+            with results_lock:
+                for r in search_gen:
+                    r['source_subreddit'] = subreddit
+                    results.append(r)
+        except Exception as e:
+            pass
+
+    for category, keywords in config['pain_keywords'].items():
+        # Limit combinations to avoid spamming
+        pairs = list(combinations(keywords, 2))
+        # Take a subset of pairs if too many
+        if len(pairs) > 5:
+            pairs = pairs[:5]
+            
+        for pair in pairs:
+            for sub in search_targets:
+                t = threading.Thread(target=search_pair, args=(category, pair, sub))
+                threads.append(t)
+                t.start()
+                # Throttle threads slightly
+                time.sleep(0.1)
+
+    for t in threads:
+        t.join()
+
+    seen = set()
+    deduped = []
+    for r in results:
+        url = r.get('href')
+        if url and url not in seen and 'reddit.com' in url:
             deduped.append(r)
             seen.add(url)
     return deduped
@@ -74,66 +199,167 @@ def scrape_thread(url):
         url = url.replace("www.reddit.com", "old.reddit.com")
     elif "reddit.com" in url and "old.reddit.com" not in url:
         url = url.replace("reddit.com", "old.reddit.com")
-        
-    click.echo(f"Scraping: {url}")
-    try:
-        resp = requests.get(url, headers={'User-Agent': USER_AGENT})
-        if resp.status_code != 200:
-            click.echo(f"Failed to fetch {url}: {resp.status_code}")
+    
+    # Retry Loop
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers={'User-Agent': USER_AGENT})
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                
+                title = soup.find('a', class_='title')
+                title_text = title.text.strip() if title else "No Title"
+                
+                # Find the main post content. In old.reddit, it's inside the siteTable div
+                site_table = soup.find('div', id='siteTable')
+                if site_table:
+                    entry = site_table.find('div', class_='entry')
+                    if entry:
+                        post_body = entry.find('div', class_='usertext-body')
+                        body_text = post_body.text.strip() if post_body else ""
+                    else:
+                        body_text = ""
+                else:
+                     post_body = soup.find('div', class_='usertext-body')
+                     body_text = post_body.text.strip() if post_body else ""
+                
+                comments = []
+                comment_area = soup.find('div', class_='commentarea')
+                if comment_area:
+                    entries = comment_area.find_all('div', class_='entry', limit=10) # Top 10 comments
+                    for entry in entries:
+                        text_div = entry.find('div', class_='usertext-body')
+                        if text_div:
+                            comments.append(text_div.text.strip())
+
+                return {
+                    'url': url,
+                    'title': title_text,
+                    'body': body_text,
+                    'comments': comments
+                }
+            elif resp.status_code == 429: # Rate limited
+                time.sleep(5 * (attempt + 1)) # Wait 5s, 10s, 15s
+                continue
+            else:
+                return None
+        except Exception as e:
             return None
             
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        
-        title = soup.find('a', class_='title')
-        title_text = title.text.strip() if title else "No Title"
-        
-        post_body = soup.find('div', class_='usertext-body')
-        body_text = post_body.text.strip() if post_body else ""
-        
-        comments = []
-        comment_area = soup.find('div', class_='commentarea')
-        if comment_area:
-            entries = comment_area.find_all('div', class_='entry', limit=10) # Top 10 comments
-            for entry in entries:
-                text_div = entry.find('div', class_='usertext-body')
-                if text_div:
-                    comments.append(text_div.text.strip())
+    return None
 
-        return {
-            'url': url,
-            'title': title_text,
-            'body': body_text,
-            'comments': comments
-        }
-    except Exception as e:
-        click.echo(f"Scraping error {url}: {e}")
+def calculate_semantic_score(post_text, industry):
+    model = load_model()
+    
+    # 1. Positive Anchors (Business Opportunities)
+    positive_anchors = {
+        "Time Wasted (Automation Opp)": f"I spend hours doing manual work, repetitive data entry, and slow administrative workflows in {industry}.",
+        "Money Lost (Compliance/Fin Opp)": f"I lost money, got fined, underpaid, or had financial errors due to mistakes in {industry}.",
+        "Bad Tools (Disruption Opp)": f"The specific software, SaaS, applications, and digital tools used in {industry} are broken, slow, expensive, or missing features."
+    }
+
+    # 2. Negative Anchors (Noise to Filter Out)
+    negative_anchors = {
+        "Career_Noise": f"I hate my boss, I want to quit, salary negotiation, interview tips, resume help, career advice, society doesn't respect us, is this career worth it, I am bored, underpaid, and undervalued in {industry}.",
+        "Student_Noise": f"How to get certified, exam study tips, which school to pick, beginner questions for {industry}.",
+        "Joy_Noise": f"I love my job in {industry}, everything is perfect, great success, high salary, happy."
+    }
+    
+    post_embedding = model.encode(post_text)
+    
+    # Calculate best positive match
+    pos_scores = {}
+    for cat, text in positive_anchors.items():
+        anchor_embedding = model.encode(text)
+        pos_scores[cat] = float(util.cos_sim(post_embedding, anchor_embedding)[0][0])
+    
+    best_cat = max(pos_scores, key=pos_scores.get)
+    best_pos_score = pos_scores[best_cat]
+
+    # Calculate "Noise Level"
+    noise_scores = []
+    for text in negative_anchors.values():
+        anchor_embedding = model.encode(text)
+        noise_scores.append(float(util.cos_sim(post_embedding, anchor_embedding)[0][0]))
+    
+    max_noise = max(noise_scores)
+
+    # 3. The "Signal-to-Noise" Adjustment
+    # If the post is more about Career/School/Joy than Business, punish the score.
+    final_score = best_pos_score
+    if max_noise > 0.40 and max_noise >= best_pos_score:
+        final_score = best_pos_score - 0.35  # Severe penalty for ambiguity
+    
+    return final_score, best_cat
+
+def analyze_content(scraped_data, config, industry):
+    # Hard Filter: Quick Reject List
+    blacklist = ["salary", "wage", "pay", "bonus", "raise", "interview", "resume", "hiring", "recruiter", 
+                 "job offer", "student", "college", "degree", "exam", "certification", "study", 
+                 "love", "happy", "fun", "great", "best", "excited"]
+    
+    title_lower = scraped_data['title'].lower()
+    if any(word in title_lower for word in blacklist):
         return None
 
-def analyze_content(scraped_data, config):
-    text_content = (scraped_data['title'] + " " + scraped_data['body'] + " ".join(scraped_data['comments'])).lower()
+    # Prepare text for keyword analysis (lower case)
+    title_body = (scraped_data['title'] + " " + scraped_data['body']).lower()
+    full_text = (title_body + " " + " ".join(scraped_data['comments'])).lower()
     
+    # 1. Keyword Analysis
     hits = {}
-    total_score = 0
+    keyword_score = 0
     
     for category, keywords in config['pain_keywords'].items():
         cat_hits = []
         for kw in keywords:
-            if kw in text_content:
+            if kw in full_text:
                 cat_hits.append(kw)
-                total_score += 1
+                keyword_score += 1
         if cat_hits:
             hits[category] = cat_hits
             
+    # 2. Semantic Analysis
+    # We use Title + Body (limited length) for semantic check to keep it focused
+    # Limit body to first 500 chars to avoid noise from long rants about unrelated stuff
+    semantic_text = f"{scraped_data['title']}. {scraped_data['body'][:500]}"
+    semantic_score, pain_category = calculate_semantic_score(semantic_text, industry)
+    
     scraped_data['analysis'] = hits
-    scraped_data['score'] = total_score
+    scraped_data['keyword_score'] = keyword_score
+    scraped_data['semantic_score'] = semantic_score
+    scraped_data['pain_category'] = pain_category
+    
     return scraped_data
 
+def process_results(results, config, industry, start_time):
+    """Helper to scrape, analyze, and print progress for a list of results."""
+    analyzed_findings = []
+    total = len(results)
+    
+    for idx, res in enumerate(results, 1):
+        url = res.get('href')
+        if not url:
+            continue
+        
+        # UI Update
+        elapsed = time.time() - start_time
+        mins, secs = divmod(int(elapsed), 60)
+        click.echo(f"[{idx}/{total}] Elapsed: {mins:02d}:{secs:02d} - {url}")
+        
+        data = scrape_thread(url)
+        if data:
+            analyzed = analyze_content(data, config, industry)
+            if analyzed: # Might be None due to hard filter
+                analyzed_findings.append(analyzed)
+        time.sleep(1)  # Be polite
+        
+    return analyzed_findings
+
 def generate_markdown_report(industry, findings):
-    # Ensure reports directory exists
     reports_dir = "reports"
     if not os.path.exists(reports_dir):
         os.makedirs(reports_dir)
-    # Use full datetime for uniqueness
     dt_str = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = os.path.join(reports_dir, f"report_{industry.replace(' ', '_')}_{dt_str}.md")
 
@@ -142,16 +368,37 @@ def generate_markdown_report(industry, findings):
         f.write(f"**Date**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         
         f.write("## Executive Summary\n")
-        f.write(f"Found {len(findings)} relevant threads.\n\n")
+        f.write(f"Found {len(findings)} relevant threads.\n")
+        f.write("Organized by Commercial Opportunity Type.\n\n")
         
-        sorted_findings = sorted(findings, key=lambda x: x['score'], reverse=True)
+        # Group by Pain Category
+        grouped = {}
+        for item in findings:
+            cat = item.get('pain_category', 'Uncategorized')
+            if cat not in grouped:
+                grouped[cat] = []
+            grouped[cat].append(item)
+            
+        # Order categories specifically
+        cat_order = ["Bad Tools (Disruption Opp)", "Time Wasted (Automation Opp)", "Money Lost (Compliance/Fin Opp)"]
         
-        f.write("## Detailed Findings\n\n")
-        
-        for item in sorted_findings:
-            if item['score'] > 0:
+        for category in cat_order:
+            items = grouped.get(category, [])
+            if not items:
+                continue
+                
+            f.write(f"## 🚨 {category}\n\n")
+            # Sort by score
+            sorted_items = sorted(items, key=lambda x: x['semantic_score'], reverse=True)
+            
+            for item in sorted_items:
                 f.write(f"### {item['title']}\n")
-                f.write(f"**Score**: {item['score']} | [Source Link]({item['url']})\n\n")
+                f.write(f"**Relevance**: {item['semantic_score']:.2f} | **Pain Points**: {item['keyword_score']} | [Source]({item['url']})\n\n")
+                
+                if item['body']:
+                    # Show a snippet of body
+                    snippet = item['body'][:200] + "..." if len(item['body']) > 200 else item['body']
+                    f.write(f"> {snippet.replace(chr(10), ' ')}\n\n")
                 
                 for cat, kws in item['analysis'].items():
                     f.write(f"- **{cat.capitalize()}**: {', '.join(kws)}\n")
@@ -174,93 +421,67 @@ def main(industry, limit, test_mode):
         click.echo(f"Error loading config: {e}")
         return
 
-    # 2. Search (initial run with higher limit)
-    initial_limit = max(limit, 30)  # Ensure at least 30 per category
+    # 2. Discover Subreddits
+    subreddits = discover_subreddits(industry)
+    if not subreddits:
+        click.echo("No specific subreddits found. Falling back to broad search.")
+    
+    # 3. Search
+    click.echo("Starting targeted search...")
+    search_limit = max(limit, 20)
     if test_mode:
-        click.echo("[TEST MODE] Limiting to 5 total searches.")
-        initial_limit = 2
-    click.echo("Starting search...")
-    search_results = search_reddit(industry, config, initial_limit)
+        click.echo("[TEST MODE] Limiting search depth.")
+        search_limit = 2
+        
+    search_results = search_reddit(industry, config, subreddits, search_limit)
 
     if not search_results:
         click.echo("No results found.")
         return
 
-    # 3. Scrape & Analyze
-    click.echo("Processing results...")
-    analyzed_findings = []
+    # 4. Scrape & Analyze
+    click.echo(f"Processing {len(search_results)} results with Semantic Analysis...")
+    
+    # Pre-load model
+    load_model()
+    
     start_time = time.time()
-    for idx, res in enumerate(search_results, 1):
-        url = res.get('href')
-        if not url:
-            continue
-        elapsed = time.time() - start_time
-        mins, secs = divmod(int(elapsed), 60)
-        click.echo(f"[{idx}/{len(search_results)}] Elapsed: {mins:02d}:{secs:02d} - Processing: {url}")
-        data = scrape_thread(url)
-        if data:
-            analyzed = analyze_content(data, config)
-            analyzed_findings.append(analyzed)
-        time.sleep(1)  # Be polite to Reddit
+    analyzed_findings = process_results(search_results, config, industry, start_time)
 
-    # Filter for relevant results (score >= 3)
-    relevant = [item for item in analyzed_findings if item['score'] >= 3]
+    # 5. Filter & Fallback
+    # Updated Thresholds:
+    # 1. Hard Filter already applied in analyze_content (returns None)
+    # 2. Semantic Score > 0.42 (Pure Semantic) OR (Semantic > 0.35 AND Keywords >= 2)
+    relevant = []
+    def is_relevant(item):
+        return item['semantic_score'] > 0.42 or (item['semantic_score'] > 0.35 and item['keyword_score'] >= 2)
 
-    # Fallback: if not enough relevant results, do one more run with pairwise combos
-    min_relevant = 10
-    # Prevent fallback in test mode
-    if not test_mode and len(relevant) < min_relevant:
-        click.echo(f"Not enough relevant results (found {len(relevant)} with score >= 3). Running fallback pairwise search...")
-        from itertools import combinations
-        extra_results = []
-        threads = []
-        results_lock = threading.Lock()
+    for item in analyzed_findings:
+        if is_relevant(item):
+            relevant.append(item)
+            
+    # Fallback Logic
+    if len(relevant) < 10 and not test_mode:
+        click.echo(f"Found only {len(relevant)} high-quality results. Triggering fallback search...")
+        
+        fallback_results = search_fallback(industry, config, subreddits, limit=5)
+        
+        # Dedup against existing
+        existing_urls = set(r['url'] for r in analyzed_findings)
+        new_urls = [r for r in fallback_results if r.get('href') not in existing_urls]
+        
+        if new_urls:
+            click.echo(f"Processing {len(new_urls)} fallback results...")
+            fallback_analyzed = process_results(new_urls, config, industry, start_time)
+            
+            for item in fallback_analyzed:
+                analyzed_findings.append(item)
+                if is_relevant(item):
+                    relevant.append(item)
+        else:
+            click.echo("Fallback search found no new unique results.")
 
-        def search_pair(category, pair):
-            query = construct_query_for_category(industry, pair)
-            click.echo(f"[Fallback] Searching [{category} pair]: {query}")
-            try:
-                ddgs = DDGS()
-                search_gen = ddgs.text(query, max_results=initial_limit)
-                with results_lock:
-                    for r in search_gen:
-                        extra_results.append(r)
-            except Exception as e:
-                click.echo(f"Fallback search failed for {category} pair: {e}")
-
-        for category, keywords in config['pain_keywords'].items():
-            for pair in combinations(keywords, 2):
-                t = threading.Thread(target=search_pair, args=(category, pair))
-                threads.append(t)
-                t.start()
-
-        for t in threads:
-            t.join()
-
-        # Deduplicate extra results
-        seen = set(r.get('href') for r in search_results)
-        deduped = []
-        for r in extra_results:
-            url = r.get('href')
-            if url and url not in seen:
-                deduped.append(r)
-                seen.add(url)
-
-        # Scrape & analyze fallback results
-        for res in deduped:
-            url = res.get('href')
-            if not url:
-                continue
-            data = scrape_thread(url)
-            if data:
-                analyzed = analyze_content(data, config)
-                analyzed_findings.append(analyzed)
-            time.sleep(1)
-
-        # Re-filter for relevant results
-        relevant = [item for item in analyzed_findings if item['score'] >= 3]
-
-    # 4. Output
+    # 6. Output
     if relevant:
         generate_markdown_report(industry, relevant)
     else:
