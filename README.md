@@ -6,60 +6,43 @@ This tool automates the "Safari" technique for discovering business ideas. It sc
 
 ## Architecture
 
-### 1. Configuration (`config.json`)
+### 1. Hybrid Discovery (`reddit_safari.py`)
+- **Discovery**: Uses DuckDuckGo to find relevant subreddits.
+  - *Strategy*: Searches `site:reddit.com/r/{industry}` and `reddit {industry} subreddit`.
+  - *Filtering*: Uses local **Llama 3** (via Ollama) to accept professional/mixed communities and reject consumer/meme subreddits.
 
-- Stores the "Pain Keywords" categorized by type:
-  - **Struggle**: "hate", "nightmare", "annoying"
-  - **Workaround**: "spreadsheet", "manual", "excel"
-  - **Big Fail**: "too expensive", "too complex"
-  - **Question**: "is there a tool", "how do I"
+### 2. Search & Scrape
+- **Engine**: DuckDuckGo (via `ddgs`) generates targeted queries (e.g., `site:reddit.com/r/farming "spreadsheet"`).
+- **Scraper**: Fetches `old.reddit.com` for static HTML parsing (Title, Body, Comments, Date).
 
-### 2. Search Module
+### 3. Aspect-Based Analysis (`pain_aspects.py`)
+- **NLP**: Uses `TextBlob` to split posts into sentences.
+- **Pain Detection**: Scans each sentence for "Pain Aspects":
+  - `visual_struggle`: "It looks terrible"
+  - `seeking_alternative`: "Is there an app for..."
+  - `tool_complaint`: "Excel is crashing"
+- **Scoring**: Calculates an `aspect_score` based on the density and intensity of pain signals.
 
-**This and the Scraper Module are temporary workarounds until we have Reddit API (praw) access**
+### 4. LLM Classification (`llm_classifier.py`)
+- **The Judge**: If aspect score > threshold, the post is sent to Llama 3.
+- **Prompt**: Uses extracted pain aspects as context to classify the post:
+  - `STRONG_OPPORTUNITY`: Clear B2B software need or deep frustration.
+  - `WEAK_OPPORTUNITY`: Ambiguous.
+  - `NOT_OPPORTUNITY`: Consumer complaint, career advice, etc.
 
-- **Engine**: DuckDuckGo (via `ddgs`) to avoid Google CAPTCHA/API limits.
-- **Strategy**: Generates composite queries.
-  - _Format_: `site:reddit.com "[Industry]" ("keyword1" OR "keyword2" ...)`
-- **Filtering**: Limits results to the last ~2 years to ensure relevance.
-
-### 3. Scraper Module
-
-- **Target**: `old.reddit.com`
-  - Why: Returns static HTML (faster, easier to parse, no React hydration issues).
-- **Process**:
-  - Converts standard reddit links to `old.reddit.com`.
-  - Fetches page content using `requests` with proper User-Agent headers.
-  - Parses HTML with `BeautifulSoup`.
-- **Extraction**:
-  - Thread Title
-  - Post Body
-  - Top-level Comments
-  - Metadata: Date, Comment Count.
-
-### 4. Analyzer Module
-
-- **Relevance Check**: Discards threads with low engagement (< 5 comments) or old dates (> 2 years).
-- **Keyword Matching**: Scans the extracted text for the pain keywords defined in `config.json`.
-- **Semantic Analysis**: Uses `sentence-transformers` to score relevance against business opportunity anchors (e.g., "Time Wasted", "Money Lost") and filter out noise.
-
-### 5. Output
-
-- Generates a Markdown report (`report_[industry]_[date].md`).
-- Sections:
-  - **Executive Summary**: Top pain points identified.
-  - **Detailed Findings**: Grouped by category (Struggle, Workaround, etc.).
-  - **Source Links**: URLs to the original discussions.
+### 5. Config (`config.json`)
+- Use `aspect_score_threshold` (default 0.5) to tune sensitivity.
+- Use `min_comments` (default 2) and `max_age_years` (default 10) to adjust scope.
 
 ## Tech Stack
-
 - **Language**: Python 3.x
-- **Libraries**:
-  - `requests` (HTTP requests)
-  - `beautifulsoup4` (HTML parsing)
-  - `ddgs` (Search automation)
-  - `sentence-transformers` (Semantic analysis)
-  - `click` (CLI interface)
+- **Core Libraries**:
+  - `click` (CLI Interface)
+  - `ollama` (Local LLM verification)
+  - `duckduckgo-search` (Search automation via `ddgs`)
+  - `textblob` (NLP Aspect Extraction)
+  - `sentence-transformers` (Semantic scoring)
+  - `beautifulsoup4` (Web scraping)
 
 ## Usage
 
