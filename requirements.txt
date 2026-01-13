@@ -1,6 +1,9 @@
 requests
 beautifulsoup4
-ddgs
+duckduckgo-search
 click
 numpy<2
 sentence-transformers
+ollama
+textblob
+nltk
